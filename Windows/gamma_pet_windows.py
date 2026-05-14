@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -7,10 +8,11 @@ from typing import Callable
 
 from PIL import Image, ImageTk
 
-
+# Near-black chroma key — invisible if it bleeds at window edges,
+# and unlikely to appear in the sprite palette.
 APP_WIDTH = 192
 APP_HEIGHT = 208
-TRANSPARENT_COLOR = "#00ff00"
+TRANSPARENT_COLOR = "#010101"
 
 ANIMATION_SPECS: dict[str, list[int]] = {
     "idle": [280, 110, 110, 140, 140, 320],
@@ -74,6 +76,22 @@ class GammaPet:
         except tk.TclError:
             pass
 
+        # Disable Windows 11 rounded corners — rounded edges produce pixels that
+        # don't match the chroma key exactly, causing a visible colored border.
+        self.root.update_idletasks()
+        try:
+            DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            DWMWCP_DONOTROUND = 1
+            hwnd = self.root.winfo_id()
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                ctypes.byref(ctypes.c_int(DWMWCP_DONOTROUND)),
+                ctypes.sizeof(ctypes.c_int),
+            )
+        except Exception:
+            pass
+
         self.canvas = tk.Canvas(
             self.root,
             width=APP_WIDTH,
@@ -101,7 +119,7 @@ class GammaPet:
         ]:
             self.menu.add_command(label=label, command=lambda s=state: self.play(s, locked=True))
         self.menu.add_separator()
-        self.menu.add_command(label="Quit Gamma", command=self.root.destroy)
+        self.menu.add_command(label="Quit Gamma", command=self._quit)
 
         self._load_frames()
         self._place_near_cursor()
@@ -110,6 +128,9 @@ class GammaPet:
         self._poll_cursor_for_pounce()
 
     def _load_frames(self) -> None:
+        tr = int(TRANSPARENT_COLOR[1:3], 16)
+        tg = int(TRANSPARENT_COLOR[3:5], 16)
+        tb = int(TRANSPARENT_COLOR[5:7], 16)
         for state in ANIMATION_SPECS:
             state_dir = self.frames_root / state
             loaded: list[ImageTk.PhotoImage] = []
@@ -120,6 +141,10 @@ class GammaPet:
                     width = max(1, round(image.width * scale))
                     height = max(1, round(image.height * scale))
                     image = image.resize((width, height), Image.Resampling.NEAREST)
+                # Composite onto the transparent color so semi-transparent edge pixels
+                # blend to exactly the chroma key, preventing a colored border halo.
+                bg = Image.new("RGBA", image.size, (tr, tg, tb, 255))
+                image = Image.alpha_composite(bg, image).convert("RGB")
                 loaded.append(ImageTk.PhotoImage(image))
             if loaded:
                 self.frames[state] = loaded
@@ -136,9 +161,9 @@ class GammaPet:
             widget.bind("<B1-Motion>", self._mouse_dragged)
             widget.bind("<ButtonRelease-1>", self._mouse_up)
             widget.bind("<Double-Button-1>", self._double_click)
-            widget.bind("<Button-3>", self._show_menu)
             widget.bind("<Key>", self._key_down)
-        self.root.bind("<Escape>", lambda _event: self.root.destroy())
+        self.canvas.bind("<Button-3>", self._show_menu)
+        self.root.bind("<Escape>", lambda _event: self._quit())
         self.root.focus_force()
 
     def _window_position(self) -> tuple[int, int]:
@@ -288,7 +313,10 @@ class GammaPet:
 
     def _show_menu(self, event: tk.Event) -> None:
         self.root.focus_force()
-        self.menu.tk_popup(event.x_root, event.y_root)
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu.grab_release()
 
     def _key_down(self, event: tk.Event) -> None:
         key = event.keysym.lower()
@@ -301,6 +329,11 @@ class GammaPet:
         action = actions.get(key)
         if action:
             action()
+
+    def _quit(self) -> None:
+        self.root.withdraw()
+        self.root.update()
+        self.root.destroy()
 
     def _poll_cursor_for_pounce(self) -> None:
         if not self.is_idle_patrolling and not self.lock_current_state and self.current_state in {"idle", "waiting"}:
